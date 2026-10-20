@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type Peer from "peerjs";
 import type { MediaConnection } from "peerjs";
+import { buildIceServers, mediaErrorMessage, peerErrorMessage } from "@/lib/call";
 
 type Status = "starting" | "waiting" | "connecting" | "in-call" | "ended" | "error";
 
@@ -14,42 +15,6 @@ const TITLES: Record<Status, string> = {
   ended: "Panggilan selesai",
   error: "Terjadi masalah",
 };
-
-function buildIceServers(): RTCIceServer[] {
-  const servers: RTCIceServer[] = [
-    { urls: "stun:stun.l.google.com:19302" },
-    { urls: "stun:stun1.l.google.com:19302" },
-  ];
-  const url = process.env.NEXT_PUBLIC_TURN_URL;
-  const username = process.env.NEXT_PUBLIC_TURN_USERNAME;
-  const credential = process.env.NEXT_PUBLIC_TURN_CREDENTIAL;
-  if (url && username && credential) servers.push({ urls: url, username, credential });
-  return servers;
-}
-
-function mediaErrorMessage(err: unknown): string {
-  const name = err instanceof DOMException ? err.name : "";
-  if (name === "NotAllowedError")
-    return "Izin kamera dan mikrofon ditolak. Aktifkan lewat ikon di address bar, lalu muat ulang halaman.";
-  if (name === "NotFoundError") return "Kamera atau mikrofon tidak ditemukan. Pastikan perangkat terpasang.";
-  return "Tidak bisa mengakses kamera/mikrofon. Mungkin sedang dipakai aplikasi lain — tutup aplikasi itu lalu muat ulang.";
-}
-
-function peerErrorMessage(type: string): string {
-  switch (type) {
-    case "peer-unavailable":
-      return "Link sudah tidak aktif. Minta link baru ke lawan bicara.";
-    case "browser-incompatible":
-      return "Browser tidak mendukung video call. Gunakan Chrome, Safari, atau Firefox versi terbaru.";
-    case "network":
-    case "server-error":
-    case "socket-error":
-    case "socket-closed":
-      return "Server penghubung tidak bisa dihubungi. Periksa koneksi internet Anda lalu coba lagi.";
-    default:
-      return "Terjadi kesalahan koneksi. Muat ulang halaman lalu coba lagi.";
-  }
-}
 
 export default function VideoCall() {
   const [status, setStatus] = useState<Status>("starting");
@@ -66,6 +31,7 @@ export default function VideoCall() {
   const localVideo = useRef<HTMLVideoElement>(null);
   const remoteVideo = useRef<HTMLVideoElement>(null);
   const disconnectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const connectTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -73,6 +39,13 @@ export default function VideoCall() {
     const joinId = new URLSearchParams(window.location.search).get("join");
     const host = !joinId;
     setIsHost(host);
+
+    const clearConnectTimer = () => {
+      if (connectTimer.current) {
+        clearTimeout(connectTimer.current);
+        connectTimer.current = null;
+      }
+    };
 
     const clearDisconnectTimer = () => {
       if (disconnectTimer.current) {
@@ -86,6 +59,7 @@ export default function VideoCall() {
       if (callRef.current !== call) return;
       callRef.current = null;
       clearDisconnectTimer();
+      clearConnectTimer();
       try {
         call.close();
       } catch {}
@@ -104,8 +78,14 @@ export default function VideoCall() {
       setStatus("connecting");
       setMessage("Menyambungkan video dan suara…");
 
+      clearConnectTimer();
+      connectTimer.current = setTimeout(() => {
+        endCall(call, "Tidak ada respons. Lawan bicara mungkin sedang dalam panggilan lain atau jaringan memblokir koneksi.");
+      }, 20000);
+
       call.on("stream", (remote) => {
         if (callRef.current !== call) return;
+        clearConnectTimer();
         if (remoteVideo.current) {
           remoteVideo.current.srcObject = remote;
           remoteVideo.current.play().catch(() => {});
@@ -205,6 +185,7 @@ export default function VideoCall() {
     return () => {
       cancelled = true;
       clearDisconnectTimer();
+      clearConnectTimer();
       if (copyTimer.current) clearTimeout(copyTimer.current);
       const call = callRef.current;
       callRef.current = null;
